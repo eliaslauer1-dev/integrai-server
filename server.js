@@ -197,7 +197,7 @@ app.post('/api/generate', async (req, res) => {
     (e.response_key_fields ? `\n  Response fields: ${e.response_key_fields.join(', ')}` : '')
   ).join('\n');
 
-  const systemPrompt = `You are a senior full-stack engineer. Generate complete, production-ready integration files. No TODOs, no stubs. Files must be native to the detected framework. For any frontend widget JS: use document.createElement() and DOM APIs only — no innerHTML, no eval(). Credentials always from process.env server-side. For static-html render target: ALWAYS include a vercel.json with outputDirectory set to "." and routes that send /api/* to serverless functions and everything else to index.html. The package.json for static sites must have build script "echo done" not a real build. Respond ONLY with a valid JSON array, no markdown fences.`;
+  const systemPrompt = `You are a senior full-stack engineer. Generate complete, production-ready integration files. No TODOs, no stubs. Files must be native to the detected framework. For any frontend widget JS: use document.createElement() and DOM APIs only — no innerHTML, no eval(). Credentials always from process.env server-side. For static-html render target: ALWAYS include a vercel.json with outputDirectory set to "." and routes that send /api/* to serverless functions and everything else to index.html. The package.json for static sites must have build script "echo done" not a real build. CRITICAL: In package.json, ALWAYS use "latest" for ALL dependency versions — never use specific version numbers like "^2.0.0" as they may not exist. Use: "package-name": "latest". Respond ONLY with a valid JSON array, no markdown fences.`;
 
   const userPrompt = 'Generate a production-ready integration.\n\n' +
     'RENDER TARGET: ' + renderTarget + '\n' +
@@ -271,6 +271,28 @@ app.post('/api/generate', async (req, res) => {
         throw new Error('Could not parse generated files: ' + parseErr.message);
       }
     }
+
+    // Sanitize package.json files — replace hallucinated versions with "latest"
+    files = files.map(f => {
+      if (f.path === 'package.json' || f.path.endsWith('/package.json')) {
+        try {
+          const pkg = JSON.parse(f.content);
+          ['dependencies', 'devDependencies', 'peerDependencies'].forEach(key => {
+            if (pkg[key]) {
+              Object.keys(pkg[key]).forEach(dep => {
+                // Force "latest" for any obscure SDK that might be hallucinated
+                const v = pkg[key][dep];
+                if (typeof v === 'string' && v.match(/\^\d+\.\d+\.\d+/) && !['express','cors','helmet','dotenv','axios','node-fetch','stripe','twilio','sendgrid'].some(k => dep.includes(k))) {
+                  pkg[key][dep] = 'latest';
+                }
+              });
+            }
+          });
+          f = { ...f, content: JSON.stringify(pkg, null, 2) };
+        } catch(e) { /* leave as-is if parse fails */ }
+      }
+      return f;
+    });
 
     res.write(`data: ${JSON.stringify({ type: 'done', files })}\n\n`);
     res.end();
