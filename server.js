@@ -330,81 +330,93 @@ Return ONLY the JavaScript code, no markdown, no explanation.`;
   }
 });
 
-// ── Widget JS builder — deterministic, no hallucinations ──────
+// ── Widget JS builder — deterministic, data-driven, no dynamic var names ──
 function buildWidgetJs(apiName, apiSlug, intent, credentials) {
-  const firstCred = (credentials[0] || {}).env_var || 'API_KEY';
-  const credFields = credentials.map(c =>
-    `    var row${c.env_var} = mk('div', 'margin-bottom:12px');\n` +
-    `    var lbl${c.env_var} = mk('label', 'display:block;font-size:.75rem;font-weight:600;color:#374151;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px');\n` +
-    `    lbl${c.env_var}.textContent = '${c.label.replace(/'/g,"\\'")}'; \n` +
-    `    var inp${c.env_var} = document.createElement('input');\n` +
-    `    inp${c.env_var}.type = 'password';\n` +
-    `    inp${c.env_var}.placeholder = '${c.env_var}';\n` +
-    `    inp${c.env_var}.id = 'iw-${c.env_var.toLowerCase()}';\n` +
-    `    inp${c.env_var}.style.cssText = 'width:100%;padding:9px 12px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.875rem;box-sizing:border-box;outline:none';\n` +
-    `    var hint${c.env_var} = mk('div', 'font-size:.72rem;color:#94a3b8;margin-top:3px');\n` +
-    `    hint${c.env_var}.textContent = '${(c.hint || '').replace(/'/g,"\\'")}'; \n` +
-    `    row${c.env_var}.appendChild(lbl${c.env_var}); row${c.env_var}.appendChild(inp${c.env_var}); row${c.env_var}.appendChild(hint${c.env_var});\n` +
-    `    form.appendChild(row${c.env_var});`
-  ).join('\n');
-
-  const credGathers = credentials.map(c =>
-    `      var val${c.env_var} = document.getElementById('iw-${c.env_var.toLowerCase()}')?.value.trim() || '';\n`
-  ).join('');
-
-  const bodyObj = credentials.length
-    ? '{ ' + credentials.map(c => `${c.env_var}: val${c.env_var}`).join(', ') + ' }'
-    : '{}';
+  // Serialize credentials as a JSON array embedded in the widget
+  const credsJson = JSON.stringify(credentials.map(c => ({
+    key:   c.env_var || '',
+    label: c.label  || '',
+    hint:  c.hint   || '',
+    type:  c.type   || 'password',
+  })));
 
   return `(function () {
+  var CREDS = ${credsJson};
+  var API_NAME = ${JSON.stringify(String(apiName))};
+  var INTENT   = ${JSON.stringify(String(intent))};
+
   function mk(tag, css) {
     var el = document.createElement(tag);
     if (css) el.style.cssText = css;
     return el;
   }
+  function txt(el, t) { el.textContent = t; return el; }
 
   function mount() {
     var root = document.getElementById('integration-widget');
-    if (!root) return;
+    if (!root) { console.warn('[IntegrAI] No #integration-widget found'); return; }
 
-    // Card shell
     var card = mk('div', 'font-family:system-ui,-apple-system,sans-serif;background:#fff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08)');
 
-    // Header
+    /* Header */
     var hdr = mk('div', 'padding:16px 20px;background:linear-gradient(135deg,#0061ff,#60a5fa);display:flex;align-items:center;gap:12px');
-    var hIcon = mk('div', 'font-size:1.3rem;flex-shrink:0');
-    hIcon.textContent = '\\u26A1';
-    var hTxt = mk('div');
-    var hTitle = mk('div', 'color:#fff;font-weight:700;font-size:.95rem');
-    hTitle.textContent = ${JSON.stringify(apiName)};
-    var hSub = mk('div', 'color:rgba(255,255,255,.8);font-size:.75rem;margin-top:1px');
-    hSub.textContent = ${JSON.stringify(intent)};
-    hTxt.appendChild(hTitle); hTxt.appendChild(hSub);
-    hdr.appendChild(hIcon); hdr.appendChild(hTxt);
+    txt(mk('div', 'font-size:1.3rem;flex-shrink:0'), '\u26A1');
+    var hicon = mk('div', 'font-size:1.3rem;flex-shrink:0');
+    hicon.textContent = '\u26A1';
+    var htxt  = mk('div');
+    txt(mk('div', 'color:#fff;font-weight:700;font-size:.95rem'), API_NAME);
+    var htitle = mk('div', 'color:#fff;font-weight:700;font-size:.95rem');
+    htitle.textContent = API_NAME;
+    var hsub = mk('div', 'color:rgba(255,255,255,.8);font-size:.75rem;margin-top:1px');
+    hsub.textContent = INTENT;
+    htxt.appendChild(htitle);
+    htxt.appendChild(hsub);
+    hdr.appendChild(hicon);
+    hdr.appendChild(htxt);
 
-    // Body
+    /* Body */
     var body = mk('div', 'padding:20px');
 
-    // Form
-    var form = mk('div');
-${credFields}
+    /* Credential fields */
+    var inputs = {};
+    CREDS.forEach(function(c) {
+      var group = mk('div', 'margin-bottom:12px');
+      var lbl = mk('label', 'display:block;font-size:.75rem;font-weight:600;color:#374151;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px');
+      lbl.textContent = c.label;
+      var inp = document.createElement('input');
+      inp.type = c.type === 'password' ? 'password' : 'text';
+      inp.placeholder = c.key;
+      inp.setAttribute('data-key', c.key);
+      inp.style.cssText = 'width:100%;padding:9px 12px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.875rem;box-sizing:border-box;outline:none;display:block';
+      inp.addEventListener('focus', function() { inp.style.borderColor = '#0061ff'; });
+      inp.addEventListener('blur',  function() { inp.style.borderColor = '#e2e8f0'; });
+      if (c.hint) {
+        var hint = mk('div', 'font-size:.72rem;color:#94a3b8;margin-top:3px');
+        hint.textContent = c.hint;
+        group.appendChild(hint);
+      }
+      group.insertBefore(lbl, group.firstChild);
+      group.insertBefore(inp, group.lastChild || null);
+      body.appendChild(group);
+      inputs[c.key] = inp;
+    });
 
-    // Submit button
+    /* Button */
     var btn = document.createElement('button');
     btn.textContent = 'Connect';
-    btn.style.cssText = 'width:100%;padding:11px;background:#0061ff;color:#fff;border:none;border-radius:8px;font-size:.9rem;font-weight:600;cursor:pointer;margin-top:8px';
+    btn.style.cssText = 'width:100%;padding:11px;background:#0061ff;color:#fff;border:none;border-radius:8px;font-size:.9rem;font-weight:600;cursor:pointer;margin-top:4px';
 
-    // Status message
+    /* Status */
     var status = mk('div', 'margin-top:12px;font-size:.85rem;display:none;padding:10px 14px;border-radius:8px');
 
-    // Result area
-    var result = mk('div', 'margin-top:16px;display:none');
-    var resultTitle = mk('div', 'font-size:.8rem;font-weight:700;color:#374151;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em');
-    resultTitle.textContent = 'Response';
-    var resultBody = mk('pre', 'background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-size:.78rem;color:#334155;overflow-x:auto;margin:0;white-space:pre-wrap;word-break:break-all');
-    result.appendChild(resultTitle); result.appendChild(resultBody);
+    /* Result */
+    var result  = mk('div', 'margin-top:16px;display:none');
+    var rtitle  = mk('div', 'font-size:.8rem;font-weight:700;color:#374151;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em');
+    rtitle.textContent = 'Response';
+    var rbody = mk('pre', 'background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-size:.78rem;color:#334155;overflow-x:auto;margin:0;white-space:pre-wrap;word-break:break-all');
+    result.appendChild(rtitle);
+    result.appendChild(rbody);
 
-    body.appendChild(form);
     body.appendChild(btn);
     body.appendChild(status);
     body.appendChild(result);
@@ -412,31 +424,30 @@ ${credFields}
     card.appendChild(body);
     root.appendChild(card);
 
-    btn.addEventListener('click', function () {
-${credGathers}
-      btn.disabled = true; btn.textContent = 'Connecting\\u2026';
-      status.style.display = 'none'; result.style.display = 'none';
+    btn.addEventListener('click', function() {
+      var payload = {};
+      CREDS.forEach(function(c) { payload[c.key] = (inputs[c.key] && inputs[c.key].value.trim()) || ''; });
+      btn.disabled = true;
+      btn.textContent = 'Connecting\u2026';
+      status.style.display = 'none';
+      result.style.display = 'none';
 
       fetch('/api/integration', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(${bodyObj}),
+        body: JSON.stringify(payload),
       })
-      .then(function (r) {
-        if (!r.ok) throw new Error('Server returned ' + r.status);
+      .then(function(r) {
+        if (!r.ok) throw new Error('Server error ' + r.status);
         return r.json();
       })
-      .then(function (d) {
-        showStatus('\\u2713 Connected successfully', true);
-        resultBody.textContent = JSON.stringify(d, null, 2);
+      .then(function(d) {
+        showStatus('\u2713 Connected', true);
+        rbody.textContent = JSON.stringify(d, null, 2);
         result.style.display = 'block';
       })
-      .catch(function (e) {
-        showStatus('\\u2717 ' + e.message, false);
-      })
-      .finally(function () {
-        btn.disabled = false; btn.textContent = 'Connect';
-      });
+      .catch(function(e) { showStatus('\u2717 ' + e.message, false); })
+      .finally(function() { btn.disabled = false; btn.textContent = 'Connect'; });
     });
 
     function showStatus(msg, ok) {
