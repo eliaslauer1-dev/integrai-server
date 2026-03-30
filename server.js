@@ -292,14 +292,29 @@ app.post('/api/push', async (req, res) => {
   const base   = defaultBranch || 'main';
 
   try {
-    // Get base commit
-    const refRes  = await ghFetch(`https://api.github.com/repos/${repo}/git/ref/heads/${base}`, hdrs);
-    const refData = await refRes.json();
-    const baseSha = refData.object.sha;
+    // Get base commit — try defaultBranch then fallback to main/master
+    let baseSha, treeSha;
+    const branchesToTry = [base, 'main', 'master'].filter((b, i, a) => a.indexOf(b) === i);
+    let usedBase = base;
 
-    const cmRes   = await ghFetch(`https://api.github.com/repos/${repo}/git/commits/${baseSha}`, hdrs);
-    const cmData  = await cmRes.json();
-    const treeSha = cmData.tree.sha;
+    for (const b of branchesToTry) {
+      const refRes = await ghFetch(`https://api.github.com/repos/${repo}/git/ref/heads/${b}`, hdrs);
+      if (refRes.ok) {
+        const refData = await refRes.json();
+        if (refData.object?.sha) {
+          baseSha = refData.object.sha;
+          usedBase = b;
+          const cmRes  = await ghFetch(`https://api.github.com/repos/${repo}/git/commits/${baseSha}`, hdrs);
+          const cmData = await cmRes.json();
+          treeSha = cmData.tree.sha;
+          break;
+        }
+      }
+    }
+
+    if (!baseSha) {
+      return res.status(400).json({ error: `Could not find branch in repo ${repo}. Tried: ${branchesToTry.join(', ')}` });
+    }
 
     // Create blobs in parallel
     const blobs = await Promise.all(files.map(async (f) => {
@@ -351,7 +366,7 @@ app.post('/api/push', async (req, res) => {
       body: JSON.stringify({
         title: `feat: ${apiName || 'API'} integration — ${intent}`,
         head: branch,
-        base,
+        base: usedBase,
         body: prBody,
       }),
     });
