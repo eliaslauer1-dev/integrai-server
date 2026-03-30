@@ -323,16 +323,25 @@ app.post('/api/push', async (req, res) => {
         method: 'POST',
         body: JSON.stringify({ content: f.content, encoding: 'utf-8' }),
       });
+      if (!bRes.ok) {
+        const err = await bRes.text();
+        throw new Error(`Blob creation failed for ${f.path}: ${bRes.status} ${err}`);
+      }
       const bData = await bRes.json();
+      if (!bData.sha) throw new Error(`No SHA returned for blob ${f.path}: ${JSON.stringify(bData)}`);
       return { path: f.path, mode: '100644', type: 'blob', sha: bData.sha };
     }));
 
     // Create tree
-    const treeRes  = await ghFetch(`https://api.github.com/repos/${repo}/git/trees`, {
+    const treeRes = await ghFetch(`https://api.github.com/repos/${repo}/git/trees`, {
       ...hdrs,
       method: 'POST',
       body: JSON.stringify({ base_tree: treeSha, tree: blobs }),
     });
+    if (!treeRes.ok) {
+      const err = await treeRes.text();
+      throw new Error(`Tree creation failed: ${treeRes.status} ${err}`);
+    }
     const treeData = await treeRes.json();
 
     // Create commit
@@ -345,22 +354,29 @@ app.post('/api/push', async (req, res) => {
         parents: [baseSha],
       }),
     });
+    if (!commitRes.ok) {
+      const err = await commitRes.text();
+      throw new Error(`Commit creation failed: ${commitRes.status} ${err}`);
+    }
     const newCommit = await commitRes.json();
 
     // Create branch
-    await ghFetch(`https://api.github.com/repos/${repo}/git/refs`, {
+    const branchRes = await ghFetch(`https://api.github.com/repos/${repo}/git/refs`, {
       ...hdrs,
       method: 'POST',
       body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: newCommit.sha }),
     });
+    if (!branchRes.ok) {
+      const err = await branchRes.text();
+      throw new Error(`Branch creation failed: ${branchRes.status} ${err}`);
+    }
 
     // Build PR body
     const fileList  = files.map(f => `- \`${f.path}\` (${f.is_new ? 'new' : 'modified'}) — ${f.description}`).join('\n');
     const credTable = (credentials || []).map(c => `| \`${c.env_var}\` | ${c.label} | ${c.hint} |`).join('\n');
-
     const prBody = `## ${apiName || 'API'} Integration\n\n**Goal:** ${intent}\n**Docs:** ${docsUrl || ''}\n\n### Files (${files.length})\n\n${fileList}\n\n### Before merging\n\nAdd these in your hosting platform's env var settings:\n\n| Variable | Label | Where to find it |\n|---|---|---|\n${credTable}\n\n> Merge → env vars set → widget live`;
 
-    const prRes  = await ghFetch(`https://api.github.com/repos/${repo}/pulls`, {
+    const prRes = await ghFetch(`https://api.github.com/repos/${repo}/pulls`, {
       ...hdrs,
       method: 'POST',
       body: JSON.stringify({
@@ -370,13 +386,17 @@ app.post('/api/push', async (req, res) => {
         body: prBody,
       }),
     });
+    if (!prRes.ok) {
+      const err = await prRes.text();
+      throw new Error(`PR creation failed: ${prRes.status} ${err}`);
+    }
     const prData = await prRes.json();
 
     return res.json({
-      pr:     prData.html_url,
-      prNum:  prData.number,
+      pr:    prData.html_url,
+      prNum: prData.number,
       branch,
-      files:  files.length,
+      files: files.length,
     });
   } catch (err) {
     console.error('[push] error:', err.message);
