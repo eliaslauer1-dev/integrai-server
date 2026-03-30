@@ -247,8 +247,22 @@ app.post('/api/generate', async (req, res) => {
       }
     }
 
-    const raw   = fullText.trim().replace(/^```[a-z]*\n?/, '').replace(/```$/, '').trim();
-    const files = JSON.parse(raw);
+    const raw = fullText.trim()
+      .replace(/^```json\s*/i, '').replace(/^```\s*/i, '')
+      .replace(/\s*```$/, '').trim();
+
+    let files;
+    try {
+      files = JSON.parse(raw);
+    } catch (parseErr) {
+      // Try to extract JSON array from the text
+      const match = raw.match(/\[[\s\S]*\]/);
+      if (match) {
+        files = JSON.parse(match[0]);
+      } else {
+        throw new Error('Could not parse generated files as JSON: ' + parseErr.message);
+      }
+    }
 
     res.write(`data: ${JSON.stringify({ type: 'done', files })}\n\n`);
     res.end();
