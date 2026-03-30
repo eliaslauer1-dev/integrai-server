@@ -183,10 +183,10 @@ app.post('/api/generate', async (req, res) => {
     'react-spa':
       `1. src/pages/${compName}Page.tsx — page component\n2. src/components/${compName}Widget.tsx — UI\n3. src/services/${apiSlug}.service.ts — API service\n4. ${entryPoint} — MODIFIED with new route\n5. package.json — MODIFIED full file\n6. INTEGRATION.md`,
     'static-html':
-      `1. index.html — MODIFIED, widget injected before </body>\n2. integration-widget.js — CSP-safe vanilla JS widget at root\n3. api/integration/index.js — Vercel serverless handler\n4. package.json — minimal\n5. INTEGRATION.md`,
+      `1. index.html — MODIFIED, widget injected before </body>\n2. integration-widget.js — CSP-safe vanilla JS widget at root\n3. api/integration/index.js — Vercel serverless function (exports default async handler)\n4. vercel.json — MUST set outputDirectory to "." and routes: [{"src":"^/api/(.*)","dest":"/api/$1"},{"src":"^/(.*)","dest":"/index.html"}]\n5. INTEGRATION.md`,
   };
   const fileList = fileListMap[renderTarget] ||
-    `1. ${entryPoint} — MODIFIED\n2. integration-widget.js — CSP-safe vanilla JS\n3. api/integration/index.js — backend handler\n4. INTEGRATION.md`;
+    `1. ${entryPoint} — MODIFIED\n2. integration-widget.js — CSP-safe vanilla JS\n3. api/integration/index.js — backend handler\n4. vercel.json — outputDirectory "." with api routing\n5. INTEGRATION.md`;
 
   const existingEntry = repoFiles[entryPoint] || '';
   const existingPkg   = repoFiles['package.json'] || '';
@@ -197,7 +197,7 @@ app.post('/api/generate', async (req, res) => {
     (e.response_key_fields ? `\n  Response fields: ${e.response_key_fields.join(', ')}` : '')
   ).join('\n');
 
-  const systemPrompt = `You are a senior full-stack engineer. Generate complete, production-ready integration files. No TODOs, no stubs. Files must be native to the detected framework. For any frontend widget JS: use document.createElement() and DOM APIs only — no innerHTML, no eval(). Credentials always from process.env server-side. Respond ONLY with a valid JSON array.`;
+  const systemPrompt = `You are a senior full-stack engineer. Generate complete, production-ready integration files. No TODOs, no stubs. Files must be native to the detected framework. For any frontend widget JS: use document.createElement() and DOM APIs only — no innerHTML, no eval(). Credentials always from process.env server-side. For static-html render target: ALWAYS include a vercel.json with outputDirectory set to "." and routes that send /api/* to serverless functions and everything else to index.html. The package.json for static sites must have build script "echo done" not a real build. Respond ONLY with a valid JSON array, no markdown fences.`;
 
   const userPrompt = 'Generate a production-ready integration.\n\n' +
     'RENDER TARGET: ' + renderTarget + '\n' +
