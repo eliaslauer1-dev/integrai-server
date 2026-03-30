@@ -232,8 +232,11 @@ app.post('/api/generate', async (req, res) => {
         : 'process.env.API_KEY';
 
       const credCheck = credEnvVars.length
-        ? `const ${credEnvVars[0]} = process.env.${credEnvVars[0]};\n  if (!${credEnvVars[0]}) return res.status(500).json({ error: '${credEnvVars[0]} not set' });`
-        : `const API_KEY = process.env.API_KEY;\n  if (!API_KEY) return res.status(500).json({ error: 'API_KEY not set' });`;
+        ? credEnvVars.map(v =>
+            `const ${v} = req.body?.${v} || process.env.${v};`
+          ).join('\n  ') +
+          `\n  if (!${credEnvVars[0]}) return res.status(500).json({ error: '${credEnvVars[0]} not set' });`
+        : `const API_KEY = req.body?.API_KEY || process.env.API_KEY;\n  if (!API_KEY) return res.status(500).json({ error: 'API_KEY not set' });`;
 
       const endpointList = (a.key_endpoints || []).slice(0, 5).map(e =>
         `${e.method} ${e.path} — ${e.purpose}`
