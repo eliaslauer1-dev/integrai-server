@@ -224,20 +224,59 @@ app.post('/api/generate', async (req, res) => {
         scripts: { build: 'echo done' }
       }, null, 2);
 
-      // 5. Use Claude ONLY for the API handler — focused, constrained prompt
+      // 5. Use Claude ONLY for the API handler — tightly constrained prompt
       send('progress', { text: 'Generating API handler…' });
 
-      const handlerPrompt = `Write a Vercel serverless function (Node.js, CommonJS, module.exports = async function handler(req, res)) that:
-- Accepts POST requests
-- Reads credentials from process.env (${credEnvVars.join(', ')})
-- Calls the ${apiName} API at ${apiBase} using ${authMethod}
-- Goal: ${intent}
-- Key endpoints: ${(a.key_endpoints || []).map(e => e.method + ' ' + e.path + ' — ' + e.purpose).join('; ')}
-- Sets CORS headers (Access-Control-Allow-Origin: *)
-- Handles OPTIONS preflight
-- Returns JSON response
+      const credList = credEnvVars.length
+        ? credEnvVars.map(v => `process.env.${v}`).join(', ')
+        : 'process.env.API_KEY';
 
-Return ONLY the JavaScript code, no markdown, no explanation.`;
+      const credCheck = credEnvVars.length
+        ? `const ${credEnvVars[0]} = process.env.${credEnvVars[0]};\n  if (!${credEnvVars[0]}) return res.status(500).json({ error: '${credEnvVars[0]} not set' });`
+        : `const API_KEY = process.env.API_KEY;\n  if (!API_KEY) return res.status(500).json({ error: 'API_KEY not set' });`;
+
+      const endpointList = (a.key_endpoints || []).slice(0, 5).map(e =>
+        `${e.method} ${e.path} — ${e.purpose}`
+      ).join('\n');
+
+      const handlerPrompt = `Write a Vercel serverless function for this exact signature:
+module.exports = async function handler(req, res) { ... }
+
+STRICT RULES — follow exactly:
+1. ONLY read these env vars: ${credEnvVars.map(v => 'process.env.' + v).join(', ')}
+2. DO NOT read any other process.env variables — no UNIT_APPLICATION_ID, no extra vars
+3. Set CORS headers at the top, handle OPTIONS preflight
+4. Use Node.js built-in fetch (no require/import needed in Node 18+)
+5. Auth method: ${authMethod}
+6. API base URL: ${apiBase}
+7. Goal: ${intent}
+
+Available endpoints to call:
+${endpointList}
+
+Start with this exact structure and fill in the API calls:
+\`\`\`
+module.exports = async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  ${credCheck}
+
+  try {
+    // YOUR API CALLS HERE using fetch()
+    // auth header: '${authMethod === 'Bearer token' ? 'Bearer ' : ''}' + ${credEnvVars[0] || 'API_KEY'}
+    
+    return res.status(200).json({ ... });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+\`\`\`
+
+Return ONLY the complete JavaScript code, no markdown fences, no explanation.`;
 
       const handlerRes = await getAnthropic().messages.create({
         model: 'claude-sonnet-4-20250514',
@@ -245,8 +284,23 @@ Return ONLY the JavaScript code, no markdown, no explanation.`;
         messages: [{ role: 'user', content: handlerPrompt }],
       });
 
-      let handlerCode = (handlerRes.content || []).filter(c => c.type === 'text').map(c => c.text).join('').trim();
+      let handlerCode = (handlerRes.content || [])
+        .filter(c => c.type === 'text').map(c => c.text).join('').trim();
       handlerCode = handlerCode.replace(/^```[a-z]*\n?/i, '').replace(/```$/,'').trim();
+
+      // Safety check — if it references undeclared env vars, strip them
+      credEnvVars.forEach(function(v) {
+        // ensure the declared var is actually used
+      });
+      // Remove any process.env references not in our credEnvVars list
+      const allowedEnvPattern = new RegExp(
+        'process\\.env\\.(?!' + (credEnvVars.join('|') || 'API_KEY') + ')([A-Z_]+)',
+        'g'
+      );
+      handlerCode = handlerCode.replace(allowedEnvPattern, function(match, varName) {
+        console.log('[generate] stripped hallucinated env var:', varName);
+        return '\'\'';
+      });
 
       // 6. INTEGRATION.md
       const credRows = (a.credentials || []).map(c => `| \`${c.env_var}\` | ${c.label} | ${c.hint} |`).join('\n');
