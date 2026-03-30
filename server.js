@@ -341,12 +341,13 @@ app.post('/api/push', async (req, res) => {
       return res.status(400).json({ error: `Could not find branch in repo ${repo}. Tried: ${branchesToTry.join(', ')}` });
     }
 
-    // Create blobs in parallel
+    // Create blobs in parallel — use base64 to handle any unicode characters
     const blobs = await Promise.all(files.map(async (f) => {
+      const content64 = Buffer.from(f.content || '', 'utf-8').toString('base64');
       const bRes = await ghFetch(`https://api.github.com/repos/${repo}/git/blobs`, {
         ...hdrs,
         method: 'POST',
-        body: JSON.stringify({ content: f.content, encoding: 'utf-8' }),
+        body: JSON.stringify({ content: content64, encoding: 'base64' }),
       });
       if (!bRes.ok) {
         const err = await bRes.text();
