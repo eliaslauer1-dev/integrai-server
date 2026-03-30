@@ -165,144 +165,298 @@ app.post('/api/generate', async (req, res) => {
   const { analysis, credValues, intent, repo, docsUrl } = req.body;
   if (!analysis || !intent) return res.status(400).json({ error: 'analysis and intent are required' });
 
-  const a             = analysis;
-  const repoFiles     = a._repoFiles || {};
-  const renderTarget  = a.render_target || 'static-html';
-  const widgetRoute   = a.widget_route  || '/integration';
-  const entryPoint    = a.entry_point   || 'index.html';
-  const apiSlug       = (a.api_name || 'integration').toLowerCase().replace(/\s+/g, '-');
-  const compName      = (a.api_name || 'Integration').replace(/\s+/g, '');
-  const creds         = Object.keys(credValues || {}).join(', ');
+  const a            = analysis;
+  const repoFiles    = a._repoFiles || {};
+  const renderTarget = a.render_target || 'static-html';
+  const entryPoint   = a.entry_point  || 'index.html';
+  const apiName      = a.api_name     || 'Integration';
+  const apiBase      = a.api_base_url || '';
+  const authMethod   = a.auth_method  || 'Bearer token';
+  const apiSlug      = apiName.toLowerCase().replace(/\s+/g, '-');
+  const creds        = credValues || {};
+  const credEnvVars  = Object.keys(creds);
+  const firstCred    = credEnvVars[0] || 'API_KEY';
+  const webhooks     = a.webhooks || [];
 
-  // Build file list instruction based on render target
-  const fileListMap = {
-    'nextjs-app-router':
-      `1. app${widgetRoute}/page.tsx — page component\n2. app/api${widgetRoute}/route.ts — GET+POST proxy\n3. app/api${widgetRoute}/webhook/route.ts — webhook with HMAC\n4. components/${compName}Widget.tsx — 'use client' UI\n5. package.json — MODIFIED full file\n6. INTEGRATION.md`,
-    'nextjs-pages-router':
-      `1. pages${widgetRoute}.tsx — page component\n2. pages/api/${apiSlug}/index.ts — GET+POST proxy\n3. pages/api/${apiSlug}/webhook.ts — webhook with HMAC\n4. components/${compName}Widget.tsx — UI component\n5. package.json — MODIFIED full file\n6. INTEGRATION.md`,
-    'react-spa':
-      `1. src/pages/${compName}Page.tsx — page component\n2. src/components/${compName}Widget.tsx — UI\n3. src/services/${apiSlug}.service.ts — API service\n4. ${entryPoint} — MODIFIED with new route\n5. package.json — MODIFIED full file\n6. INTEGRATION.md`,
-    'static-html':
-      `1. index.html — MODIFIED, widget injected before </body>\n2. integration-widget.js — CSP-safe vanilla JS widget at root\n3. api/integration/index.js — Vercel serverless function (exports default async handler)\n4. vercel.json — MUST set outputDirectory to "." and routes: [{"src":"^/api/(.*)","dest":"/api/$1"},{"src":"^/(.*)","dest":"/index.html"}]\n5. INTEGRATION.md`,
-  };
-  const fileList = fileListMap[renderTarget] ||
-    `1. ${entryPoint} — MODIFIED\n2. integration-widget.js — CSP-safe vanilla JS\n3. api/integration/index.js — backend handler\n4. vercel.json — outputDirectory "." with api routing\n5. INTEGRATION.md`;
+  // Stream headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
 
-  const existingEntry = repoFiles[entryPoint] || '';
-  const existingPkg   = repoFiles['package.json'] || '';
-
-  const endpointDocs = (a.key_endpoints || []).map(e =>
-    `${e.method} ${e.path} — ${e.purpose}` +
-    (e.request_body && Object.keys(e.request_body).length ? `\n  Body: ${JSON.stringify(e.request_body)}` : '') +
-    (e.response_key_fields ? `\n  Response fields: ${e.response_key_fields.join(', ')}` : '')
-  ).join('\n');
-
-  const systemPrompt = `You are a senior full-stack engineer. Generate complete, production-ready integration files. No TODOs, no stubs. Files must be native to the detected framework. CRITICAL WIDGET RULES: (1) The widget JS file MUST be a self-invoking IIFE that mounts automatically to document.getElementById('integration-widget') — never use window.BankingWidget.init() or any manual init pattern. (2) The HTML file MUST have <div id="integration-widget"> as the mount point — never use a different ID like "banking-widget-container". (3) Widget JS uses document.createElement() and DOM APIs only — no innerHTML, no eval(). (4) Credentials always from process.env server-side. For static-html render target: ALWAYS include a vercel.json with outputDirectory set to "." and routes that send /api/* to serverless functions and everything else to index.html. The package.json for static sites must have build script "echo done" not a real build. CRITICAL: In package.json use "latest" for ALL dependency versions. Respond ONLY with a valid JSON array, no markdown fences.`;
-
-  const userPrompt = 'Generate a production-ready integration.\n\n' +
-    'RENDER TARGET: ' + renderTarget + '\n' +
-    'WIDGET ROUTE: ' + widgetRoute + '\n' +
-    'ENTRY POINT: ' + entryPoint + ' — MUST be included modified\n\n' +
-    'REPO: ' + (repo || '') + '\n' +
-    'GOAL: ' + intent + '\n' +
-    'STACK: ' + JSON.stringify(a.stack) + '\n' +
-    'PATTERNS: ' + (a.existing_patterns || []).join(', ') + '\n\n' +
-    'API: ' + (a.api_name || '') + '\n' +
-    'BASE URL: ' + (a.api_base_url || '') + '\n' +
-    'AUTH: ' + (a.auth_method || '') + '\n' +
-    'CREDENTIALS (process.env only): ' + creds + '\n\n' +
-    'KEY ENDPOINTS:\n' + endpointDocs + '\n\n' +
-    'WEBHOOKS:\n' + (a.webhooks || []).map(w => w.event + ': ' + w.description).join('\n') + '\n\n' +
-    'PACKAGES TO ADD: ' + (a.packages_to_add || []).map(p => p.name).join(', ') + '\n\n' +
-    'EXISTING ' + entryPoint + ':\n' + existingEntry + '\n\n' +
-    'EXISTING package.json:\n' + existingPkg + '\n\n' +
-    'Files to generate:\n' + fileList + '\n\n' +
-    'Requirements:\n' +
-    '1. Widget UI matches the goal exactly: "' + intent + '"\n' +
-    '2. Frontend calls your own backend — never the external API directly\n' +
-    '3. Backend adds auth headers from process.env\n' +
-    '4. Webhook verifies HMAC-SHA256\n' +
-    '5. Modified files include COMPLETE content\n' +
-    '6. No innerHTML, no eval — CSP-safe DOM APIs only\n\n' +
-    'Return JSON: [{"path","content","description","is_new":true|false}]';
+  const send = (type, data) => res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
 
   try {
-    // Stream the response for long generations
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
+    // ── For static-html: build most files deterministically, only use Claude for API handler ──
+    if (renderTarget === 'static-html' || renderTarget === 'express-static') {
+
+      // 1. Inject widget div into existing index.html or create new one
+      const existingHtml = repoFiles['index.html'] || repoFiles[entryPoint] || '';
+      const widgetDiv = '\n\n<!-- IntegrAI: ' + apiName + ' Widget -->\n<div id="integration-widget" style="max-width:520px;margin:40px auto;padding:0 24px"></div>\n<script src="/integration-widget.js"><\\/script>';
+      let indexContent;
+      if (existingHtml && existingHtml.includes('</body>')) {
+        indexContent = existingHtml.replace('</body>', widgetDiv + '\n</body>');
+      } else if (existingHtml) {
+        indexContent = existingHtml + widgetDiv.replace('<\\/script>', '</script>');
+      } else {
+        indexContent = '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width,initial-scale=1">\n  <title>' + apiName + '</title>\n  <style>body{font-family:system-ui,sans-serif;background:#f8fafc;padding:40px 24px;margin:0}h1{text-align:center;color:#1a202c}</style>\n</head>\n<body>\n  <h1>' + apiName + '</h1>\n  <div id="integration-widget" style="max-width:520px;margin:0 auto"></div>\n  <script src="/integration-widget.js"></script>\n</body>\n</html>';
+      }
+      // Fix escaped script tag
+      indexContent = indexContent.replace('<\\/script>', '</script>');
+
+      // 2. Build widget JS deterministically (always correct, no hallucinations)
+      const widgetJs = buildWidgetJs(apiName, apiSlug, intent, a.credentials || []);
+
+      // 3. vercel.json — always correct
+      const vercelJson = JSON.stringify({
+        version: 2,
+        outputDirectory: '.',
+        routes: [
+          { src: '^/api/(.*)', dest: '/api/$1' },
+          { src: '^/integration-widget\\.js$', dest: '/integration-widget.js' },
+          { src: '^/(.*)', dest: '/index.html' }
+        ]
+      }, null, 2);
+
+      // 4. package.json — minimal, no hallucinated packages
+      const packageJson = JSON.stringify({
+        name: (repo || 'app').split('/').pop().toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+        version: '1.0.0',
+        scripts: { build: 'echo done' }
+      }, null, 2);
+
+      // 5. Use Claude ONLY for the API handler — focused, constrained prompt
+      send('progress', { text: 'Generating API handler…' });
+
+      const handlerPrompt = `Write a Vercel serverless function (Node.js, CommonJS, module.exports = async function handler(req, res)) that:
+- Accepts POST requests
+- Reads credentials from process.env (${credEnvVars.join(', ')})
+- Calls the ${apiName} API at ${apiBase} using ${authMethod}
+- Goal: ${intent}
+- Key endpoints: ${(a.key_endpoints || []).map(e => e.method + ' ' + e.path + ' — ' + e.purpose).join('; ')}
+- Sets CORS headers (Access-Control-Allow-Origin: *)
+- Handles OPTIONS preflight
+- Returns JSON response
+
+Return ONLY the JavaScript code, no markdown, no explanation.`;
+
+      const handlerRes = await getAnthropic().messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 3000,
+        messages: [{ role: 'user', content: handlerPrompt }],
+      });
+
+      let handlerCode = (handlerRes.content || []).filter(c => c.type === 'text').map(c => c.text).join('').trim();
+      handlerCode = handlerCode.replace(/^```[a-z]*\n?/i, '').replace(/```$/,'').trim();
+
+      // 6. INTEGRATION.md
+      const credRows = (a.credentials || []).map(c => `| \`${c.env_var}\` | ${c.label} | ${c.hint} |`).join('\n');
+      const integrationMd = `# ${apiName} Integration\n\n**Goal:** ${intent}\n\n## After merging\n\n1. Add environment variables in Vercel dashboard:\n\n| Variable | Label | Where to find |\n|---|---|---|\n${credRows}\n\n2. The widget renders automatically at the root URL\n3. Webhook URL: \`https://your-domain.com/api/integration/webhook\`\n`;
+
+      const files = [
+        { path: 'index.html',                    is_new: !existingHtml, description: 'HTML with widget injected',     content: indexContent },
+        { path: 'integration-widget.js',          is_new: true,          description: 'Self-invoking widget UI',       content: widgetJs },
+        { path: 'api/integration/index.js',       is_new: true,          description: apiName + ' API handler',        content: handlerCode },
+        { path: 'vercel.json',                    is_new: true,          description: 'Vercel routing config',         content: vercelJson },
+        { path: 'package.json',                   is_new: true,          description: 'Minimal package.json',          content: packageJson },
+        { path: 'INTEGRATION.md',                 is_new: true,          description: 'Setup guide',                   content: integrationMd },
+      ];
+
+      send('done', { files });
+      res.end();
+      return;
+    }
+
+    // ── For Next.js / React / other frameworks: use Claude for full generation ──
+    const apiSlugFull  = (a.api_name || 'integration').toLowerCase().replace(/\s+/g, '-');
+    const compName     = (a.api_name || 'Integration').replace(/\s+/g, '');
+    const widgetRoute  = a.widget_route || '/integration';
+    const fileListMap  = {
+      'nextjs-app-router':   `1. app${widgetRoute}/page.tsx\n2. app/api${widgetRoute}/route.ts — GET+POST proxy\n3. app/api${widgetRoute}/webhook/route.ts — webhook\n4. components/${compName}Widget.tsx — 'use client' IIFE-style widget\n5. package.json — MODIFIED\n6. INTEGRATION.md`,
+      'nextjs-pages-router': `1. pages${widgetRoute}.tsx\n2. pages/api/${apiSlugFull}/index.ts — GET+POST proxy\n3. pages/api/${apiSlugFull}/webhook.ts — webhook\n4. components/${compName}Widget.tsx\n5. package.json — MODIFIED\n6. INTEGRATION.md`,
+      'react-spa':           `1. src/pages/${compName}Page.tsx\n2. src/components/${compName}Widget.tsx\n3. src/services/${apiSlugFull}.service.ts\n4. ${entryPoint} — MODIFIED with route\n5. package.json — MODIFIED\n6. INTEGRATION.md`,
+    };
+    const fileList = fileListMap[renderTarget] || `1. ${entryPoint} — MODIFIED\n2. api/${apiSlugFull}/index.ts\n3. package.json — MODIFIED\n4. INTEGRATION.md`;
+    const existingEntry = repoFiles[entryPoint] || '';
+    const existingPkg   = repoFiles['package.json'] || '';
+    const endpointDocs  = (a.key_endpoints || []).map(e => `${e.method} ${e.path} — ${e.purpose}`).join('\n');
+
+    const systemPrompt = `You are a senior full-stack engineer. Generate complete, production-ready integration files. No TODOs, no stubs. Credentials always from process.env. In package.json use "latest" for ALL versions. Respond ONLY with a valid JSON array, no markdown.`;
+    const userPrompt = `Generate integration files.\nRENDER TARGET: ${renderTarget}\nGOAL: ${intent}\nSTACK: ${JSON.stringify(a.stack)}\nAPI: ${apiName} at ${apiBase}\nAUTH: ${authMethod}\nCREDENTIALS: ${credEnvVars.join(', ')}\nENDPOINTS:\n${endpointDocs}\nEXISTING ${entryPoint}:\n${existingEntry}\nEXISTING package.json:\n${existingPkg}\nFiles:\n${fileList}\nReturn JSON: [{"path","content","description","is_new":true|false}]`;
 
     let fullText = '';
-
     const stream = await getAnthropic().messages.stream({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 16000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
-
     for await (const chunk of stream) {
       if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
         fullText += chunk.delta.text;
-        res.write(`data: ${JSON.stringify({ type: 'progress', text: chunk.delta.text })}\n\n`);
+        send('progress', { text: chunk.delta.text });
       }
     }
 
-    const raw = fullText.trim()
-      .replace(/^```json\s*/i, '').replace(/^```\s*/i, '')
-      .replace(/\s*```$/, '')
-      .replace(/\\(?!["\\/bfnrtu])/g, '\\\\')  // fix unescaped backslashes
-      .trim();
-
+    const raw = fullText.trim().replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/\s*```$/,'').replace(/\\(?!["\\/bfnrtu])/g,'\\\\').trim();
     let files;
-    try {
-      files = JSON.parse(raw);
-    } catch (parseErr) {
-      // Try to extract JSON array from anywhere in the text
-      const match = raw.match(/\[[\s\S]*\]/);
-      if (match) {
-        try {
-          files = JSON.parse(match[0]);
-        } catch(e2) {
-          // Last resort: try replacing bad backslashes in the match
-          files = JSON.parse(match[0].replace(/\\(?!["\\/bfnrtu])/g, '\\\\'));
-        }
-      } else {
-        throw new Error('Could not parse generated files: ' + parseErr.message);
-      }
+    try { files = JSON.parse(raw); }
+    catch(e) {
+      const m = raw.match(/\[[\s\S]*\]/);
+      if (m) { try { files = JSON.parse(m[0]); } catch(e2) { files = JSON.parse(m[0].replace(/\\(?!["\\/bfnrtu])/g,'\\\\')); } }
+      else throw new Error('Could not parse files: ' + e.message);
     }
 
-    // Sanitize package.json files — replace hallucinated versions with "latest"
+    // Sanitize package versions
     files = files.map(f => {
       if (f.path === 'package.json' || f.path.endsWith('/package.json')) {
         try {
           const pkg = JSON.parse(f.content);
-          ['dependencies', 'devDependencies', 'peerDependencies'].forEach(key => {
-            if (pkg[key]) {
-              Object.keys(pkg[key]).forEach(dep => {
-                // Force "latest" for any obscure SDK that might be hallucinated
-                const v = pkg[key][dep];
-                if (typeof v === 'string' && v.match(/\^\d+\.\d+\.\d+/) && !['express','cors','helmet','dotenv','axios','node-fetch','stripe','twilio','sendgrid'].some(k => dep.includes(k))) {
-                  pkg[key][dep] = 'latest';
-                }
-              });
-            }
+          ['dependencies','devDependencies'].forEach(k => {
+            if (pkg[k]) Object.keys(pkg[k]).forEach(dep => { pkg[k][dep] = 'latest'; });
           });
           f = { ...f, content: JSON.stringify(pkg, null, 2) };
-        } catch(e) { /* leave as-is if parse fails */ }
+        } catch(e) {}
       }
       return f;
     });
 
-    res.write(`data: ${JSON.stringify({ type: 'done', files })}\n\n`);
+    send('done', { files });
     res.end();
   } catch (err) {
     console.error('[generate] error:', err.message);
     if (!res.headersSent) return res.status(500).json({ error: err.message });
-    res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+    send('error', { message: err.message });
     res.end();
   }
 });
+
+// ── Widget JS builder — deterministic, no hallucinations ──────
+function buildWidgetJs(apiName, apiSlug, intent, credentials) {
+  const firstCred = (credentials[0] || {}).env_var || 'API_KEY';
+  const credFields = credentials.map(c =>
+    `    var row${c.env_var} = mk('div', 'margin-bottom:12px');\n` +
+    `    var lbl${c.env_var} = mk('label', 'display:block;font-size:.75rem;font-weight:600;color:#374151;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px');\n` +
+    `    lbl${c.env_var}.textContent = '${c.label.replace(/'/g,"\\'")}'; \n` +
+    `    var inp${c.env_var} = document.createElement('input');\n` +
+    `    inp${c.env_var}.type = 'password';\n` +
+    `    inp${c.env_var}.placeholder = '${c.env_var}';\n` +
+    `    inp${c.env_var}.id = 'iw-${c.env_var.toLowerCase()}';\n` +
+    `    inp${c.env_var}.style.cssText = 'width:100%;padding:9px 12px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.875rem;box-sizing:border-box;outline:none';\n` +
+    `    var hint${c.env_var} = mk('div', 'font-size:.72rem;color:#94a3b8;margin-top:3px');\n` +
+    `    hint${c.env_var}.textContent = '${(c.hint || '').replace(/'/g,"\\'")}'; \n` +
+    `    row${c.env_var}.appendChild(lbl${c.env_var}); row${c.env_var}.appendChild(inp${c.env_var}); row${c.env_var}.appendChild(hint${c.env_var});\n` +
+    `    form.appendChild(row${c.env_var});`
+  ).join('\n');
+
+  const credGathers = credentials.map(c =>
+    `      var val${c.env_var} = document.getElementById('iw-${c.env_var.toLowerCase()}')?.value.trim() || '';\n`
+  ).join('');
+
+  const bodyObj = credentials.length
+    ? '{ ' + credentials.map(c => `${c.env_var}: val${c.env_var}`).join(', ') + ' }'
+    : '{}';
+
+  return `(function () {
+  function mk(tag, css) {
+    var el = document.createElement(tag);
+    if (css) el.style.cssText = css;
+    return el;
+  }
+
+  function mount() {
+    var root = document.getElementById('integration-widget');
+    if (!root) return;
+
+    // Card shell
+    var card = mk('div', 'font-family:system-ui,-apple-system,sans-serif;background:#fff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08)');
+
+    // Header
+    var hdr = mk('div', 'padding:16px 20px;background:linear-gradient(135deg,#0061ff,#60a5fa);display:flex;align-items:center;gap:12px');
+    var hIcon = mk('div', 'font-size:1.3rem;flex-shrink:0');
+    hIcon.textContent = '\\u26A1';
+    var hTxt = mk('div');
+    var hTitle = mk('div', 'color:#fff;font-weight:700;font-size:.95rem');
+    hTitle.textContent = ${JSON.stringify(apiName)};
+    var hSub = mk('div', 'color:rgba(255,255,255,.8);font-size:.75rem;margin-top:1px');
+    hSub.textContent = ${JSON.stringify(intent)};
+    hTxt.appendChild(hTitle); hTxt.appendChild(hSub);
+    hdr.appendChild(hIcon); hdr.appendChild(hTxt);
+
+    // Body
+    var body = mk('div', 'padding:20px');
+
+    // Form
+    var form = mk('div');
+${credFields}
+
+    // Submit button
+    var btn = document.createElement('button');
+    btn.textContent = 'Connect';
+    btn.style.cssText = 'width:100%;padding:11px;background:#0061ff;color:#fff;border:none;border-radius:8px;font-size:.9rem;font-weight:600;cursor:pointer;margin-top:8px';
+
+    // Status message
+    var status = mk('div', 'margin-top:12px;font-size:.85rem;display:none;padding:10px 14px;border-radius:8px');
+
+    // Result area
+    var result = mk('div', 'margin-top:16px;display:none');
+    var resultTitle = mk('div', 'font-size:.8rem;font-weight:700;color:#374151;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em');
+    resultTitle.textContent = 'Response';
+    var resultBody = mk('pre', 'background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-size:.78rem;color:#334155;overflow-x:auto;margin:0;white-space:pre-wrap;word-break:break-all');
+    result.appendChild(resultTitle); result.appendChild(resultBody);
+
+    body.appendChild(form);
+    body.appendChild(btn);
+    body.appendChild(status);
+    body.appendChild(result);
+    card.appendChild(hdr);
+    card.appendChild(body);
+    root.appendChild(card);
+
+    btn.addEventListener('click', function () {
+${credGathers}
+      btn.disabled = true; btn.textContent = 'Connecting\\u2026';
+      status.style.display = 'none'; result.style.display = 'none';
+
+      fetch('/api/integration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(${bodyObj}),
+      })
+      .then(function (r) {
+        if (!r.ok) throw new Error('Server returned ' + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        showStatus('\\u2713 Connected successfully', true);
+        resultBody.textContent = JSON.stringify(d, null, 2);
+        result.style.display = 'block';
+      })
+      .catch(function (e) {
+        showStatus('\\u2717 ' + e.message, false);
+      })
+      .finally(function () {
+        btn.disabled = false; btn.textContent = 'Connect';
+      });
+    });
+
+    function showStatus(msg, ok) {
+      status.style.display = 'block';
+      status.style.cssText = 'margin-top:12px;font-size:.85rem;display:block;padding:10px 14px;border-radius:8px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';color:' + (ok ? '#16a34a' : '#dc2626') + ';border:1px solid ' + (ok ? '#bbf7d0' : '#fecaca');
+      status.textContent = msg;
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mount);
+  } else {
+    mount();
+  }
+})();
+`;
+}
+
+  // Build file list instruction based on render target — handled above per render target
+  // (old code removed — see new generate endpoint above)
 
 // ══════════════════════════════════════════════════════════════
 //  PUSH — commits files to GitHub via Git Trees API
