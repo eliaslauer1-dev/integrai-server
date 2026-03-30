@@ -345,8 +345,8 @@ app.post('/api/push', async (req, res) => {
     const blobs = await Promise.all(files.map(async (f) => {
       const content64 = Buffer.from(f.content || '', 'utf-8').toString('base64');
       const bRes = await ghFetch(`https://api.github.com/repos/${repo}/git/blobs`, {
-        ...hdrs,
         method: 'POST',
+        headers: hdrs,
         body: JSON.stringify({ content: content64, encoding: 'base64' }),
       });
       if (!bRes.ok) {
@@ -360,8 +360,8 @@ app.post('/api/push', async (req, res) => {
 
     // Create tree
     const treeRes = await ghFetch(`https://api.github.com/repos/${repo}/git/trees`, {
-      ...hdrs,
       method: 'POST',
+      headers: hdrs,
       body: JSON.stringify({ base_tree: treeSha, tree: blobs }),
     });
     if (!treeRes.ok) {
@@ -372,8 +372,8 @@ app.post('/api/push', async (req, res) => {
 
     // Create commit
     const commitRes = await ghFetch(`https://api.github.com/repos/${repo}/git/commits`, {
-      ...hdrs,
       method: 'POST',
+      headers: hdrs,
       body: JSON.stringify({
         message: `feat: IntegrAI integration — ${intent}`,
         tree: treeData.sha,
@@ -388,8 +388,8 @@ app.post('/api/push', async (req, res) => {
 
     // Create branch
     const branchRes = await ghFetch(`https://api.github.com/repos/${repo}/git/refs`, {
-      ...hdrs,
       method: 'POST',
+      headers: hdrs,
       body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: newCommit.sha }),
     });
     if (!branchRes.ok) {
@@ -403,8 +403,8 @@ app.post('/api/push', async (req, res) => {
     const prBody = `## ${apiName || 'API'} Integration\n\n**Goal:** ${intent}\n**Docs:** ${docsUrl || ''}\n\n### Files (${files.length})\n\n${fileList}\n\n### Before merging\n\nAdd these in your hosting platform's env var settings:\n\n| Variable | Label | Where to find it |\n|---|---|---|\n${credTable}\n\n> Merge → env vars set → widget live`;
 
     const prRes = await ghFetch(`https://api.github.com/repos/${repo}/pulls`, {
-      ...hdrs,
       method: 'POST',
+      headers: hdrs,
       body: JSON.stringify({
         title: `feat: ${apiName || 'API'} integration — ${intent}`,
         head: branch,
@@ -550,10 +550,15 @@ app.get('/api/admin/stats', async (req, res) => {
 
 // ── Helpers ────────────────────────────────────────────────────
 async function ghFetch(url, headersOrOpts) {
-  const opts = typeof headersOrOpts === 'object' && headersOrOpts.headers
-    ? headersOrOpts
-    : { headers: headersOrOpts };
-  if (!opts.headers) opts.headers = {};
+  let opts;
+  if (typeof headersOrOpts === 'object' && (headersOrOpts.method || headersOrOpts.body || headersOrOpts.headers)) {
+    // Full options object passed
+    opts = { ...headersOrOpts };
+    if (!opts.headers) opts.headers = {};
+  } else {
+    // Plain headers object passed
+    opts = { headers: headersOrOpts || {} };
+  }
   if (!opts.headers['User-Agent']) opts.headers['User-Agent'] = 'IntegrAI/1.0';
   return fetch(url, opts);
 }
