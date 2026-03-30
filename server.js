@@ -22,6 +22,7 @@ const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_KEY
   : null;
 
 // ── Middleware ─────────────────────────────────────────────────
+app.set('trust proxy', 1);
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
   origin: '*',
@@ -249,18 +250,25 @@ app.post('/api/generate', async (req, res) => {
 
     const raw = fullText.trim()
       .replace(/^```json\s*/i, '').replace(/^```\s*/i, '')
-      .replace(/\s*```$/, '').trim();
+      .replace(/\s*```$/, '')
+      .replace(/\\(?!["\\/bfnrtu])/g, '\\\\')  // fix unescaped backslashes
+      .trim();
 
     let files;
     try {
       files = JSON.parse(raw);
     } catch (parseErr) {
-      // Try to extract JSON array from the text
+      // Try to extract JSON array from anywhere in the text
       const match = raw.match(/\[[\s\S]*\]/);
       if (match) {
-        files = JSON.parse(match[0]);
+        try {
+          files = JSON.parse(match[0]);
+        } catch(e2) {
+          // Last resort: try replacing bad backslashes in the match
+          files = JSON.parse(match[0].replace(/\\(?!["\\/bfnrtu])/g, '\\\\'));
+        }
       } else {
-        throw new Error('Could not parse generated files as JSON: ' + parseErr.message);
+        throw new Error('Could not parse generated files: ' + parseErr.message);
       }
     }
 
@@ -278,10 +286,27 @@ app.post('/api/generate', async (req, res) => {
 //  PUSH — commits files to GitHub via Git Trees API
 // ══════════════════════════════════════════════════════════════
 app.post('/api/push', async (req, res) => {
-  const { token, repo, defaultBranch, files, intent, apiName, docsUrl, credentials } = req.body;
+  let { token, repo, defaultBranch, files, intent, apiName, docsUrl, credentials } = req.body;
   if (!token || !repo || !files?.length) {
     return res.status(400).json({ error: 'token, repo and files are required' });
   }
+
+  // Auto-fix repo if missing owner — get it from the token
+  if (!repo.includes('/')) {
+    try {
+      const userRes = await ghFetch('https://api.github.com/user', {
+        Authorization: `token ${token}`,
+        'User-Agent': 'IntegrAI/1.0',
+      });
+      const userData = await userRes.json();
+      repo = `${userData.login}/${repo}`;
+      console.log(`[push] auto-fixed repo to: ${repo}`);
+    } catch(e) {
+      return res.status(400).json({ error: `repo must be in format owner/name, got: ${repo}` });
+    }
+  }
+
+  console.log(`[push] pushing ${files.length} files to ${repo}`);
 
   const hdrs = {
     Authorization: `token ${token}`,
